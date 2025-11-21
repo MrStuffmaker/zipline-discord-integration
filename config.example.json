@@ -1,0 +1,7 @@
+{
+  "discordToken": "DISCORD_BOT_TOKEN",
+  "clientId": "DISCORD_CLIENT_ID",
+  "guildId": "TEST_GUILD_ID",
+  "ziplineBaseUrl": "https://zipline-instance.example",
+  "errorWebhookUrl": "https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN"
+}
