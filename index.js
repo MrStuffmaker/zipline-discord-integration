@@ -32,7 +32,7 @@ let userSettings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
 
 const webhook = config.errorWebhookUrl ? new WebhookClient({ url: config.errorWebhookUrl }) : null;
 
-// Logging Funktionen
+// Logging functions
 function logInfo(msg) { console.log(chalk.blue('[INFO]'), msg); }
 function logSuccess(msg) { console.log(chalk.green('[SUCCESS]'), msg); }
 function logWarn(msg) { console.log(chalk.yellow('[WARN]'), msg); }
@@ -47,7 +47,7 @@ function logError(error, ctx = '') {
   }
 }
 
-// Token und Settings speichern
+// Token and settings management
 function saveTokens() { fs.writeFileSync(TOKENS_FILE, JSON.stringify(userTokens, null, 2)); }
 function saveSettings() { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(userSettings, null, 2)); }
 
@@ -55,10 +55,19 @@ function getUserToken(userId) { return userTokens[userId] || null; }
 function setUserToken(userId, token) { userTokens[userId] = token; saveTokens(); }
 function deleteUserToken(userId) { delete userTokens[userId]; saveTokens(); }
 
-function getUserSettings(userId) { return userSettings[userId] || { expiry: null, compression: null }; }
-function setUserSettings(userId, settings) { userSettings[userId] = settings; saveSettings(); }
+function getUserSettings(userId) {
+  return userSettings[userId] || { expiry: null, compression: null };
+}
 
-// User Info API
+function setUserSettings(userId, settings) {
+  userSettings[userId] = {
+    expiry: settings.expiry?.trim() || null,
+    compression: settings.compression?.trim() || null
+  };
+  saveSettings();
+}
+
+// User info API
 async function ziplineGetMe(token) {
   const res = await fetch(`${ZIPLINE_BASE_URL}/api/user`, {
     headers: { Authorization: token }
@@ -67,7 +76,7 @@ async function ziplineGetMe(token) {
   return res.json();
 }
 
-// Einzelne Seite mit Dateien abrufen
+// Fetch one page of uploads
 async function ziplineFetchUserUploads(token, page = 1, perpage = 50) {
   const url = `${ZIPLINE_BASE_URL}/api/user/files?page=${page}&perpage=${perpage}&sortBy=createdAt&order=desc&filter=all`;
   const res = await fetch(url, { headers: { Authorization: token } });
@@ -76,7 +85,7 @@ async function ziplineFetchUserUploads(token, page = 1, perpage = 50) {
   return JSON.parse(text);
 }
 
-// Alle Seiten und Dateien sammeln
+// Fetch all uploads
 async function ziplineFetchAllUserUploads(token) {
   let allUploads = [];
   let page = 1;
@@ -92,13 +101,10 @@ async function ziplineFetchAllUserUploads(token) {
   return allUploads;
 }
 
-// Datei hochladen mit Settings
+// Upload file (with user settings)
+// Fixed here: use header x-zipline-deletes-at for expiry
 async function ziplineUploadFromUrl(token, fileUrl, filename, userId) {
   const settings = getUserSettings(userId);
-  const params = new URLSearchParams();
-  if (settings.expiry) params.append('expiry', settings.expiry);
-  if (settings.compression) params.append('compression', settings.compression);
-  const uploadUrl = params.toString() ? `${ZIPLINE_BASE_URL}/api/upload?${params.toString()}` : `${ZIPLINE_BASE_URL}/api/upload`;
 
   const tmpPath = path.join('./', `tmp_${Date.now()}_${filename}`);
   const dlRes = await fetch(fileUrl);
@@ -114,66 +120,83 @@ async function ziplineUploadFromUrl(token, fileUrl, filename, userId) {
   const form = new FormData();
   form.append('file', fs.createReadStream(tmpPath));
 
-  const resUpload = await fetch(uploadUrl, {
+  const headers = {
+    Authorization: token,
+    ...form.getHeaders()
+  };
+
+  // Apply expiry header if set
+  if (settings.expiry && settings.expiry !== '') {
+    headers['x-zipline-deletes-at'] = settings.expiry;
+  }
+
+  // Apply compression header if needed (check Zipline docs for header name)
+  if (settings.compression && settings.compression !== '') {
+    headers['x-zipline-compression'] = settings.compression;
+  }
+
+  const resUpload = await fetch(`${ZIPLINE_BASE_URL}/api/upload`, {
     method: 'POST',
-    headers: { Authorization: token },
+    headers,
     body: form
   });
 
   fs.unlinkSync(tmpPath);
-
   if (!resUpload.ok) throw new Error(`Zipline upload error ${resUpload.status}`);
 
   return resUpload.json();
 }
 
-
 const commands = [
   new SlashCommandBuilder()
     .setName('zipline')
-    .setDescription('Zipline Befehle')
+    .setDescription('Zipline commands')
     .addSubcommand(sub =>
       sub.setName('settoken')
-        .setDescription('Setze deinen Zipline API Token')
-        .addStringOption(opt => opt.setName('token').setDescription('Dein Token').setRequired(true))
+        .setDescription('Set your Zipline API token')
+        .addStringOption(opt => opt.setName('token').setDescription('Your token').setRequired(true))
     )
-    .addSubcommand(sub => sub.setName('me').setDescription('Zeige deine Benutzerdaten'))
-    .addSubcommand(sub => sub.setName('list').setDescription('Zeige deine Uploads'))
+    .addSubcommand(sub => sub.setName('me').setDescription('Show your account info'))
+    .addSubcommand(sub => sub.setName('list').setDescription('List your uploads'))
     .addSubcommand(sub =>
       sub.setName('upload')
-        .setDescription('Lade eine Datei hoch')
-        .addAttachmentOption(opt => opt.setName('file').setDescription('Datei hochladen').setRequired(true))
+        .setDescription('Upload a file')
+        .addAttachmentOption(opt => opt.setName('file').setDescription('File to upload').setRequired(true))
     )
     .addSubcommand(sub =>
       sub.setName('settings')
-        .setDescription('Setze Standard Ablauf & Kompression')
-        .addStringOption(opt => opt.setName('expiry').setDescription('Expiry in Tagen').setRequired(false))
-        .addStringOption(opt => opt.setName('compression').setDescription('Kompressionsstufe').setRequired(false))
+        .setDescription('Set default expiry & compression')
+        .addStringOption(opt => opt.setName('expiry').setDescription('Expiry in days or date').setRequired(false))
+        .addStringOption(opt => opt.setName('compression').setDescription('Compression level').setRequired(false))
     )
-    .addSubcommand(sub => sub.setName('logout').setDescription('Token löschen (Logout)'))
-    .addSubcommand(sub => sub.setName('invite').setDescription('Bot Einladungslink anzeigen'))
-    .addSubcommand(sub => sub.setName('about').setDescription('Über den Bot mit Commands'))
+    .addSubcommand(sub => sub.setName('logout').setDescription('Delete token (logout)'))
+    .addSubcommand(sub => sub.setName('invite').setDescription('Show bot invite link'))
+    .addSubcommand(sub => sub.setName('about').setDescription('Info about the bot and its commands'))
     .toJSON()
 ];
 
 async function deployCommands() {
   const rest = new REST({ version: '10' }).setToken(config.discordToken);
   try {
-    logInfo('Slash-Befehle werden global registriert...');
-    await rest.put(
-      Routes.applicationCommands(config.clientId),
-      { body: commands }
-    );
-    logSuccess('Slash-Befehle erfolgreich registriert.');
+    logInfo('Registering global slash commands...');
+    await rest.put(Routes.applicationCommands(config.clientId), { body: commands });
+    logSuccess('Slash commands registered successfully.');
   } catch (err) {
-    logError(err, 'Registrierung Slash-Befehle');
+    logError(err, 'Registering slash commands');
   }
 }
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once('ready', () => {
-  logSuccess(`Eingeloggt als ${client.user.tag}`);
+  logSuccess(`Logged in as ${client.user.tag}`);
+  client.user.setPresence({
+    status: 'online',
+    activities: [{
+      name: 'www.stuffmaker.net',
+      type: 4
+    }]
+  });
 });
 
 async function paginateUploads(interaction, uploads) {
@@ -182,49 +205,47 @@ async function paginateUploads(interaction, uploads) {
   const totalPages = Math.ceil(uploads.length / pageSize);
 
   function formatFileSize(bytes) {
-  if (!bytes || bytes === 0) return 'unbekannt';
-  const kb = 1024;
-  const mb = kb * 1024;
-  if (bytes < mb) return `${(bytes / kb).toFixed(1)} KB`;
-  return `${(bytes / mb).toFixed(2)} MB`;
-}
+    if (!bytes || bytes === 0) return 'unknown';
+    const kb = 1024;
+    const mb = kb * 1024;
+    if (bytes < mb) return `${(bytes / kb).toFixed(1)} KB`;
+    return `${(bytes / mb).toFixed(2)} MB`;
+  }
 
-function createEmbed() {
-  const embed = new EmbedBuilder()
-    .setTitle('Deine Uploads')
-    .setFooter({ text: `Seite ${page + 1} von ${totalPages}` });
-  const slice = uploads.slice(page * pageSize, (page + 1) * pageSize);
+  function createEmbed() {
+    const embed = new EmbedBuilder()
+      .setTitle('Your Uploads')
+      .setFooter({ text: `Page ${page + 1} of ${totalPages}` });
+    const slice = uploads.slice(page * pageSize, (page + 1) * pageSize);
 
-  function trimString(str, maxLength = 15) {
-  if (!str) return '';
-  return str.length > maxLength ? str.slice(0, maxLength - 1) + '…' : str;
-}
-const descriptionLines = slice.map(f => {
-const name = trimString(f.originalName || f.name || 'Unbenannt', 15);
-  const url = f.url && f.url.startsWith('http') ? f.url : `${ZIPLINE_BASE_URL}${f.url || `/u/${f.id}`}`;
-  const sizeStr = formatFileSize(f.size);
-  const createdTimestamp = f.createdAt ? Math.floor(new Date(f.createdAt).getTime() / 1000) : null;
-  const createdDiscordTime = createdTimestamp ? `<t:${createdTimestamp}:R>` : 'unbekannt';
-  return `• [${name}](${url}) — ${sizeStr} — Erstellt: ${createdDiscordTime}`;
-});
+    function trimString(str, maxLength = 15) {
+      if (!str) return '';
+      return str.length > maxLength ? str.slice(0, maxLength - 1) + '…' : str;
+    }
 
+    const descriptionLines = slice.map(f => {
+      const name = trimString(f.originalName || f.name || 'Unnamed', 15);
+      const url = f.url && f.url.startsWith('http') ? f.url : `${ZIPLINE_BASE_URL}${f.url || `/u/${f.id}`}`;
+      const sizeStr = formatFileSize(f.size);
+      const createdTimestamp = f.createdAt ? Math.floor(new Date(f.createdAt).getTime() / 1000) : null;
+      const createdDiscordTime = createdTimestamp ? `<t:${createdTimestamp}:R>` : 'unknown';
+      return `• [${name}](${url}) — ${sizeStr} — Created: ${createdDiscordTime}`;
+    });
 
-
-  embed.setDescription(descriptionLines.join('\n'));
-
-  return embed;
-}
+    embed.setDescription(descriptionLines.join('\n'));
+    return embed;
+  }
 
   const row = new ActionRowBuilder()
     .addComponents(
       new ButtonBuilder()
         .setCustomId('prev')
-        .setLabel('⬅️ Zurück')
+        .setLabel('⬅️ Back')
         .setStyle(ButtonStyle.Primary)
         .setDisabled(page === 0),
       new ButtonBuilder()
         .setCustomId('next')
-        .setLabel('➡️ Weiter')
+        .setLabel('➡️ Next')
         .setStyle(ButtonStyle.Primary)
         .setDisabled(page + 1 === totalPages)
     );
@@ -240,7 +261,7 @@ const name = trimString(f.originalName || f.name || 'Unbenannt', 15);
 
   collector.on('collect', async i => {
     if (i.user.id !== interaction.user.id) {
-      i.reply({ content: 'Nur du kannst die Seiten wechseln!', ephemeral: true });
+      i.reply({ content: 'Only you can navigate pages!', ephemeral: true });
       return;
     }
     if (i.customId === 'prev' && page > 0) page--;
@@ -253,12 +274,12 @@ const name = trimString(f.originalName || f.name || 'Unbenannt', 15);
           .addComponents(
             new ButtonBuilder()
               .setCustomId('prev')
-              .setLabel('⬅️ Zurück')
+              .setLabel('⬅️ Back')
               .setStyle(ButtonStyle.Primary)
               .setDisabled(page === 0),
             new ButtonBuilder()
               .setCustomId('next')
-              .setLabel('➡️ Weiter')
+              .setLabel('➡️ Next')
               .setStyle(ButtonStyle.Primary)
               .setDisabled(page + 1 === totalPages)
           )
@@ -267,10 +288,9 @@ const name = trimString(f.originalName || f.name || 'Unbenannt', 15);
   });
 
   collector.on('end', () => {
-    message.edit({ components: [] }).catch(() => {});
+    message.edit({ components: [] }).catch(() => { });
   });
 }
-
 
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand() || interaction.commandName !== 'zipline') return;
@@ -283,19 +303,19 @@ client.on('interactionCreate', async interaction => {
     if (sub === 'settoken') {
       const token = interaction.options.getString('token', true);
       setUserToken(userId, token);
-      await interaction.reply({ content: '🔐 Token gespeichert!', ephemeral: true });
+      await interaction.reply({ content: '🔐 Token saved!', ephemeral: true });
       return;
     }
 
     if (sub === 'logout') {
       deleteUserToken(userId);
-      await interaction.reply({ content: '🚪 Du wurdest ausgeloggt.', ephemeral: true });
+      await interaction.reply({ content: '🚪 You have been logged out.', ephemeral: true });
       return;
     }
 
     if (sub === 'invite') {
       const inviteLink = `https://discord.com/oauth2/authorize?client_id=${config.clientId}&permissions=277025725920&scope=bot%20applications.commands`;
-      await interaction.reply({ content: `🤖 Lade mich ein:\n${inviteLink}`, ephemeral: true });
+      await interaction.reply({ content: `🤖 Invite me using this link:\n${inviteLink}`, ephemeral: true });
       return;
     }
 
@@ -317,27 +337,27 @@ client.on('interactionCreate', async interaction => {
           new ButtonBuilder().setLabel('GitHub').setStyle(ButtonStyle.Link).setURL('https://github.com/yourrepo').setEmoji('🐙')
         );
 
-      await interaction.reply({ content: `💡 **Über den Bot**\n\n${commandsList}`, components: [row], ephemeral: true });
+      await interaction.reply({ content: `💡 **About the Bot**\n\n${commandsList}`, components: [row], ephemeral: true });
       return;
     }
 
     const token = getUserToken(userId);
     if (!token) {
-      await interaction.reply({ content: '❗ Bitte zuerst Token mit /zipline settoken setzen.', ephemeral: true });
+      await interaction.reply({ content: '❗ Please set your token first using /zipline settoken.', ephemeral: true });
       return;
     }
 
     if (sub === 'me') {
       await interaction.deferReply({ ephemeral: true });
       const data = await ziplineGetMe(token);
-      await interaction.editReply(`**Benutzername:** ${data.username}\n**Rolle:** ${data.role}\nSpeicher: ${data.quota?.used || 0}/${data.quota?.max || '∞'}`);
+      await interaction.editReply(`**Username:** ${data.username}\n**Role:** ${data.role}\nStorage: ${data.quota?.used || 0}/${data.quota?.max || '∞'}`);
       return;
     }
 
     if (sub === 'list') {
       const uploads = await ziplineFetchAllUserUploads(token);
       if (!uploads.length) {
-        await interaction.reply({ content: 'Keine Uploads gefunden.', ephemeral: true });
+        await interaction.reply({ content: 'No uploads found.', ephemeral: true });
         return;
       }
       await paginateUploads(interaction, uploads);
@@ -349,7 +369,7 @@ client.on('interactionCreate', async interaction => {
       await interaction.deferReply({ ephemeral: true });
       const uploadResp = await ziplineUploadFromUrl(token, attachment.url, attachment.name, userId);
       const urls = (uploadResp.files || []).map(f => f.url || `${ZIPLINE_BASE_URL}/u/${f.id}`).join('\n');
-      await interaction.editReply(`✅ Upload erfolgreich:\n${urls}`);
+      await interaction.editReply(`✅ Upload successful:\n${urls}`);
       return;
     }
 
@@ -357,19 +377,17 @@ client.on('interactionCreate', async interaction => {
       const expiry = interaction.options.getString('expiry');
       const compression = interaction.options.getString('compression');
       setUserSettings(userId, { expiry, compression });
-      await interaction.reply({ content: '🛠 Einstellungen gespeichert.', ephemeral: true });
+      await interaction.reply({ content: '🛠 Settings saved.', ephemeral: true });
       return;
     }
-
   } catch (error) {
     logError(error, 'InteractionHandler');
     if (interaction.deferred || interaction.replied) {
-      await interaction.editReply('❌ Fehler aufgetreten.');
+      await interaction.editReply('❌ An error occurred.');
     } else {
-      await interaction.reply({ content: '❌ Fehler aufgetreten.', ephemeral: true });
+      await interaction.reply({ content: '❌ An error occurred.', ephemeral: true });
     }
   }
 });
-
 
 deployCommands().then(() => client.login(config.discordToken));

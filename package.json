@@ -1,6 +1,6 @@
 {
   "name": "zipline-discord-integration",
-  "version": "0.2.3",
+  "version": "0.0.3",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -10,6 +10,7 @@
     "chalk": "^5.6.2",
     "discord.js": "^14.15.0",
     "form-data": "^4.0.0",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "pm2": "^6.0.13"
   }
 }
