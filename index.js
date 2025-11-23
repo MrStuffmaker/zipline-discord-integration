@@ -15,7 +15,9 @@ import path from 'path';
 import fetch from 'node-fetch';
 import FormData from 'form-data';
 import chalk from 'chalk';
+import os from 'os';
 
+// Config and constants
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
 const ZIPLINE_BASE_URL = config.ziplineBaseUrl;
 
@@ -102,7 +104,6 @@ async function ziplineFetchAllUserUploads(token) {
 }
 
 // Upload file (with user settings)
-// Fixed here: use header x-zipline-deletes-at for expiry
 async function ziplineUploadFromUrl(token, fileUrl, filename, userId) {
   const settings = getUserSettings(userId);
 
@@ -130,7 +131,7 @@ async function ziplineUploadFromUrl(token, fileUrl, filename, userId) {
     headers['x-zipline-deletes-at'] = settings.expiry;
   }
 
-  // Apply compression header if needed (check Zipline docs for header name)
+  // Apply compression header if needed
   if (settings.compression && settings.compression !== '') {
     headers['x-zipline-compression'] = settings.compression;
   }
@@ -172,6 +173,10 @@ const commands = [
     .addSubcommand(sub => sub.setName('logout').setDescription('Delete token (logout)'))
     .addSubcommand(sub => sub.setName('invite').setDescription('Show bot invite link'))
     .addSubcommand(sub => sub.setName('about').setDescription('Info about the bot and its commands'))
+    .addSubcommand(sub =>
+      sub.setName('stats')
+        .setDescription('Show host/server resource usage, Zipline stats, and your storage usage')
+    )
     .toJSON()
 ];
 
@@ -292,6 +297,43 @@ async function paginateUploads(interaction, uploads) {
   });
 }
 
+// Helper: get human-readable OS name
+function getReadableOSName() {
+  const platform = os.platform();
+  const release = os.release();
+
+  if (platform === 'win32') {
+    if (release.startsWith('10.0')) return 'Windows Server 2016/2019/2022';
+    if (release.startsWith('6.3')) return 'Windows Server 2012 R2';
+    if (release.startsWith('6.2')) return 'Windows Server 2012';
+    if (release.startsWith('6.1')) return 'Windows Server 2008 R2';
+    return `Windows (Release ${release})`;
+  }
+
+  if (platform === 'linux') {
+    try {
+      const osRelease = fs.readFileSync('/etc/os-release', 'utf8');
+      const match = osRelease.match(/^PRETTY_NAME="(.+)"$/m);
+      if (match) return match[1];
+    } catch {
+    }
+    return `Linux kernel ${release}`;
+  }
+
+  if (platform === 'darwin') {
+    return 'macOS ' + release;
+  }
+
+  return `${platform} ${release}`;
+}
+
+// Zipline stats API
+async function ziplineGetStats() {
+  const res = await fetch(`${ZIPLINE_BASE_URL}/api/stats`);
+  if (!res.ok) throw new Error(`Zipline /api/stats error ${res.status}`);
+  return res.json();
+}
+
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand() || interaction.commandName !== 'zipline') return;
 
@@ -314,7 +356,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (sub === 'invite') {
-      const inviteLink = `https://discord.com/oauth2/authorize?client_id=${config.clientId}&permissions=277025725920&scope=bot%20applications.commands`;
+      const inviteLink = `https://discord.com/oauth2/authorize?client_id=${config.clientId}`;
       await interaction.reply({ content: `🤖 Invite me using this link:\n${inviteLink}`, ephemeral: true });
       return;
     }
@@ -329,6 +371,7 @@ client.on('interactionCreate', async interaction => {
         'settings ⚙️ `/zipline settings [expiry] [compression]`',
         'invite 🤖 `/zipline invite`',
         'about ℹ️ `/zipline about`',
+        'stats 📊 `/zipline stats`'
       ].join('\n');
 
       const row = new ActionRowBuilder()
@@ -378,6 +421,64 @@ client.on('interactionCreate', async interaction => {
       const compression = interaction.options.getString('compression');
       setUserSettings(userId, { expiry, compression });
       await interaction.reply({ content: '🛠 Settings saved.', ephemeral: true });
+      return;
+    }
+
+    if (sub === 'stats') {
+      await interaction.deferReply({ ephemeral: true });
+
+      // Host system stats
+      const hostStats = {
+        os: getReadableOSName(),
+        uptime: os.uptime(),
+        loadAvg: os.loadavg(),
+        totalMem: os.totalmem(),
+        freeMem: os.freemem(),
+        usedMem: process.memoryUsage().rss,
+        cpuCount: os.cpus().length
+      };
+
+      // Zipline stats
+      let zipStats;
+      try {
+        zipStats = await ziplineGetStats();
+      } catch (err) {
+        zipStats = { error: 'Unavailable' };
+      }
+
+      // User stats
+      let userMe;
+      try {
+        userMe = await ziplineGetMe(token);
+      } catch (err) {
+        userMe = { username: 'Unknown', quota: { used: 0, max: 0 } };
+      }
+
+      const content = [
+        `**Host System**`,
+        `• OS: ${hostStats.os}`,
+        `• Uptime: ${(hostStats.uptime / 3600).toFixed(2)} hours`,
+        `• CPUs: ${hostStats.cpuCount}`,
+        `• Load Avg (1m): ${hostStats.loadAvg[0].toFixed(2)}`,
+        `• RAM used: ${(hostStats.usedMem / (1024 ** 2)).toFixed(2)} MB`,
+        `• RAM free: ${(hostStats.freeMem / (1024 ** 2)).toFixed(2)} MB`,
+        ``,
+        `**Zipline Stats**`,
+        zipStats.error
+          ? `• Error: ${zipStats.error}`
+          : [
+            `• Users: ${zipStats.users ?? '?'}`,
+            `• Files: ${zipStats.files ?? '?'}`,
+            `• Total Size: ${zipStats.size ? (zipStats.size / (1024 ** 3)).toFixed(2) + " GB" : '?'}`,
+          ].join('\n'),
+        ``,
+        `**Your Storage**`,
+        `• Username: ${userMe.username ?? '?'}`,
+        `• Used: ${((userMe.quota?.used ?? 0) / (1024 ** 2)).toFixed(2)} MB`,
+        `• Max: ${userMe.quota?.max ? ((userMe.quota.max) / (1024 ** 2)).toFixed(2) + " MB" : '∞'}`
+      ].join('\n');
+
+      await interaction.editReply({ content });
       return;
     }
   } catch (error) {
