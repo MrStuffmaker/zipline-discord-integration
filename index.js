@@ -75,6 +75,29 @@ function setUserSettings(userId, settings) {
   saveSettings();
 }
 
+// Token validation function
+async function validateZiplineToken(token) {
+  try {
+    const res = await fetch(`${ZIPLINE_BASE_URL}/api/user`, {
+      headers: { Authorization: token }
+    });
+
+    if (!res.ok) {
+      return { valid: false, error: `HTTP ${res.status} - Invalid token or unauthorized` };
+    }
+
+    const data = await res.json();
+    return {
+      valid: true,
+      user: data.username || 'Unknown',
+      role: data.role || 'Unknown',
+      quota: data.quota || { used: 0, max: '∞' }
+    };
+  } catch (error) {
+    return { valid: false, error: 'Network error or invalid Zipline URL' };
+  }
+}
+
 // User info API
 async function ziplineGetMe(token) {
   const res = await fetch(`${ZIPLINE_BASE_URL}/api/user`, {
@@ -205,7 +228,7 @@ client.once(Events.ClientReady, () => {
   });
 });
 
-// Helper for pagination of uploads
+// Pagination helper
 async function paginateUploads(interaction, uploads) {
   const pageSize = 5;
   let page = 0;
@@ -336,7 +359,7 @@ async function ziplineGetStats() {
   return res.json();
 }
 
-// Interactions handler
+// Interaction handler
 client.on(Events.InteractionCreate, async interaction => {
   const userId = interaction.user.id;
 
@@ -345,9 +368,37 @@ client.on(Events.InteractionCreate, async interaction => {
       const sub = interaction.options.getSubcommand(true);
 
       if (sub === 'settoken') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
         const token = interaction.options.getString('token', true);
-        setUserToken(userId, token);
-        await interaction.reply({ content: '🔐 Token saved!', flags: MessageFlags.Ephemeral });
+
+        const validation = await validateZiplineToken(token);
+
+        if (validation.valid) {
+          setUserToken(userId, token);
+          const embed = new EmbedBuilder()
+            .setTitle('✅ Token Valid & Saved!')
+            .setDescription(`**User:** ${validation.user}\n**Role:** ${validation.role}\n**Storage:** ${validation.quota.used}/${validation.quota.max}`)
+            .addFields(
+              { name: '🔗 Zipline', value: `[Open Dashboard](${ZIPLINE_BASE_URL})`, inline: true }
+            )
+            .setColor(0x00ff00)
+            .setThumbnail(interaction.user.displayAvatarURL({ format: 'png', size: 1024 }));
+
+          await interaction.editReply({ embeds: [embed] });
+        } else {
+          const embed = new EmbedBuilder()
+            .setTitle('❌ Invalid Token')
+            .setDescription(`**Error:** ${validation.error}`)
+            .addFields(
+              { name: '💡 Tip', value: `Get your token from ${ZIPLINE_BASE_URL}/dashboard`, inline: false },
+              { name: '🔗', value: `[Zipline Dashboard](${ZIPLINE_BASE_URL})`, inline: true }
+            )
+            .setColor(0xff0000)
+            .setThumbnail(interaction.user.displayAvatarURL({ format: 'png', size: 1024 }));
+
+          await interaction.editReply({ embeds: [embed] });
+        }
         return;
       }
 
@@ -358,14 +409,21 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       if (sub === 'invite') {
-        const inviteLink = `https://discord.com/oauth2/authorize?client_id=${config.clientId} | https://mr.stuffmaker.net/get-zipline-bot `;
-        await interaction.reply({ content: `🤖 Use me using this link:\n${inviteLink}\n Use me as user authorised app for it to work`, //flags: MessageFlags.Ephemeral 
-          });
+        const inviteLink = `https://discord.com/oauth2/authorize?client_id=${config.clientId}`;
+        await interaction.reply({ content: `🤖 Invite me using this link:\n${inviteLink}`, flags: MessageFlags.Ephemeral });
         return;
       }
 
       if (sub === 'about') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        let botVersion = 'unknown';
+        try {
+          const packageJson = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+          botVersion = packageJson.version || 'unknown';
+        } catch {
+          botVersion = 'unknown';
+        }
 
         const commandId = '1441450591409668117';
 
@@ -392,21 +450,19 @@ client.on(Events.InteractionCreate, async interaction => {
             new ButtonBuilder()
               .setLabel('Support')
               .setStyle(ButtonStyle.Link)
-              .setURL('https://discord.fish/stuffmaker')
+              .setURL('https://discord.gg/support')
               .setEmoji('🆘'),
             new ButtonBuilder()
               .setLabel('GitHub')
               .setStyle(ButtonStyle.Link)
-              .setURL('https://github.com/MrStuffmaker/zipline-discord-integration')
-              .setEmoji('🐙'),
-               new ButtonBuilder()
-              .setLabel('Website')
-              .setStyle(ButtonStyle.Link)
-              .setURL('https://zipline-bot.pawpatrol.dev')
-              .setEmoji('🌐')
+              .setURL('https://github.com/yourrepo')
+              .setEmoji('🐙')
           );
 
-        await interaction.editReply({ content: `💡 **About the Bot**\n\n${commandsList}`, components: [row] });
+        await interaction.editReply({
+          content: `💡 **Zipline Bot v${botVersion}**\n\n${commandsList}`,
+          components: [row]
+        });
         return;
       }
 
@@ -441,10 +497,13 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      // From here, token is required
+      // From here, token is needed
       const token = getUserToken(userId);
       if (!token) {
-        await interaction.reply({ content: '❗ Please set your token first using </zipline settoken:1441450591409668117>.', flags: MessageFlags.Ephemeral });
+        await interaction.reply({
+          content: `❗ Please set your token first using </zipline settoken:1441450591409668117>.\n🔗 Zipline URL: ${ZIPLINE_BASE_URL}`,
+          flags: MessageFlags.Ephemeral
+        });
         return;
       }
 
@@ -527,7 +586,7 @@ client.on(Events.InteractionCreate, async interaction => {
       }
     }
 
-    // Button Interactions for Settings
+    // Buttons for Settings
     if (interaction.isButton() && (interaction.customId === 'edit_expiry' || interaction.customId === 'edit_compression')) {
       const modal = new ModalBuilder()
         .setCustomId(interaction.customId)
