@@ -8,7 +8,13 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  EmbedBuilder
+  EmbedBuilder,
+  Events,
+  MessageFlags,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  InteractionType
 } from 'discord.js';
 import fs from 'fs';
 import path from 'path';
@@ -126,12 +132,10 @@ async function ziplineUploadFromUrl(token, fileUrl, filename, userId) {
     ...form.getHeaders()
   };
 
-  // Apply expiry header if set
   if (settings.expiry && settings.expiry !== '') {
     headers['x-zipline-deletes-at'] = settings.expiry;
   }
 
-  // Apply compression header if needed
   if (settings.compression && settings.compression !== '') {
     headers['x-zipline-compression'] = settings.compression;
   }
@@ -148,6 +152,7 @@ async function ziplineUploadFromUrl(token, fileUrl, filename, userId) {
   return resUpload.json();
 }
 
+// Slash commands definition
 const commands = [
   new SlashCommandBuilder()
     .setName('zipline')
@@ -164,12 +169,7 @@ const commands = [
         .setDescription('Upload a file')
         .addAttachmentOption(opt => opt.setName('file').setDescription('File to upload').setRequired(true))
     )
-    .addSubcommand(sub =>
-      sub.setName('settings')
-        .setDescription('Set default expiry & compression')
-        .addStringOption(opt => opt.setName('expiry').setDescription('Expiry in days or date').setRequired(false))
-        .addStringOption(opt => opt.setName('compression').setDescription('Compression level').setRequired(false))
-    )
+    .addSubcommand(sub => sub.setName('settings').setDescription('Manage your default upload settings'))
     .addSubcommand(sub => sub.setName('logout').setDescription('Delete token (logout)'))
     .addSubcommand(sub => sub.setName('invite').setDescription('Show bot invite link'))
     .addSubcommand(sub => sub.setName('about').setDescription('Info about the bot and its commands'))
@@ -191,9 +191,10 @@ async function deployCommands() {
   }
 }
 
+// Create Discord client
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-client.once('ready', () => {
+client.once(Events.ClientReady, () => {
   logSuccess(`Logged in as ${client.user.tag}`);
   client.user.setPresence({
     status: 'online',
@@ -204,6 +205,7 @@ client.once('ready', () => {
   });
 });
 
+// Helper for pagination of uploads
 async function paginateUploads(interaction, uploads) {
   const pageSize = 5;
   let page = 0;
@@ -258,7 +260,7 @@ async function paginateUploads(interaction, uploads) {
   const message = await interaction.reply({
     embeds: [createEmbed()],
     components: [row],
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     fetchReply: true
   });
 
@@ -266,7 +268,7 @@ async function paginateUploads(interaction, uploads) {
 
   collector.on('collect', async i => {
     if (i.user.id !== interaction.user.id) {
-      i.reply({ content: 'Only you can navigate pages!', ephemeral: true });
+      await i.reply({ content: 'Only you can navigate pages!', flags: MessageFlags.Ephemeral });
       return;
     }
     if (i.customId === 'prev' && page > 0) page--;
@@ -334,161 +336,252 @@ async function ziplineGetStats() {
   return res.json();
 }
 
-client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand() || interaction.commandName !== 'zipline') return;
-
+// Interactions handler
+client.on(Events.InteractionCreate, async interaction => {
   const userId = interaction.user.id;
 
   try {
-    const sub = interaction.options.getSubcommand(true);
+    if (interaction.isChatInputCommand() && interaction.commandName === 'zipline') {
+      const sub = interaction.options.getSubcommand(true);
 
-    if (sub === 'settoken') {
-      const token = interaction.options.getString('token', true);
-      setUserToken(userId, token);
-      await interaction.reply({ content: '🔐 Token saved!', ephemeral: true });
-      return;
-    }
-
-    if (sub === 'logout') {
-      deleteUserToken(userId);
-      await interaction.reply({ content: '🚪 You have been logged out.', ephemeral: true });
-      return;
-    }
-
-    if (sub === 'invite') {
-      const inviteLink = `https://discord.com/oauth2/authorize?client_id=${config.clientId}`;
-      await interaction.reply({ content: `🤖 Invite me using this link:\n${inviteLink}`, ephemeral: true });
-      return;
-    }
-
-    if (sub === 'about') {
-      const commandsList = [
-        'settoken 🔐 `/zipline settoken <token>`',
-        'logout 🚪 `/zipline logout`',
-        'me 👤 `/zipline me`',
-        'list 📂 `/zipline list`',
-        'upload 📤 `/zipline upload <file>`',
-        'settings ⚙️ `/zipline settings [expiry] [compression]`',
-        'invite 🤖 `/zipline invite`',
-        'about ℹ️ `/zipline about`',
-        'stats 📊 `/zipline stats`'
-      ].join('\n');
-
-      const row = new ActionRowBuilder()
-        .addComponents(
-          new ButtonBuilder().setLabel('Support').setStyle(ButtonStyle.Link).setURL('https://discord.gg/support').setEmoji('🆘'),
-          new ButtonBuilder().setLabel('GitHub').setStyle(ButtonStyle.Link).setURL('https://github.com/yourrepo').setEmoji('🐙')
-        );
-
-      await interaction.reply({ content: `💡 **About the Bot**\n\n${commandsList}`, components: [row], ephemeral: true });
-      return;
-    }
-
-    const token = getUserToken(userId);
-    if (!token) {
-      await interaction.reply({ content: '❗ Please set your token first using /zipline settoken.', ephemeral: true });
-      return;
-    }
-
-    if (sub === 'me') {
-      await interaction.deferReply({ ephemeral: true });
-      const data = await ziplineGetMe(token);
-      await interaction.editReply(`**Username:** ${data.username}\n**Role:** ${data.role}\nStorage: ${data.quota?.used || 0}/${data.quota?.max || '∞'}`);
-      return;
-    }
-
-    if (sub === 'list') {
-      const uploads = await ziplineFetchAllUserUploads(token);
-      if (!uploads.length) {
-        await interaction.reply({ content: 'No uploads found.', ephemeral: true });
+      if (sub === 'settoken') {
+        const token = interaction.options.getString('token', true);
+        setUserToken(userId, token);
+        await interaction.reply({ content: '🔐 Token saved!', flags: MessageFlags.Ephemeral });
         return;
       }
-      await paginateUploads(interaction, uploads);
-      return;
-    }
 
-    if (sub === 'upload') {
-      const attachment = interaction.options.getAttachment('file', true);
-      await interaction.deferReply({ ephemeral: true });
-      const uploadResp = await ziplineUploadFromUrl(token, attachment.url, attachment.name, userId);
-      const urls = (uploadResp.files || []).map(f => f.url || `${ZIPLINE_BASE_URL}/u/${f.id}`).join('\n');
-      await interaction.editReply(`✅ Upload successful:\n${urls}`);
-      return;
-    }
-
-    if (sub === 'settings') {
-      const expiry = interaction.options.getString('expiry');
-      const compression = interaction.options.getString('compression');
-      setUserSettings(userId, { expiry, compression });
-      await interaction.reply({ content: '🛠 Settings saved.', ephemeral: true });
-      return;
-    }
-
-    if (sub === 'stats') {
-      await interaction.deferReply({ ephemeral: true });
-
-      // Host system stats
-      const hostStats = {
-        os: getReadableOSName(),
-        uptime: os.uptime(),
-        loadAvg: os.loadavg(),
-        totalMem: os.totalmem(),
-        freeMem: os.freemem(),
-        usedMem: process.memoryUsage().rss,
-        cpuCount: os.cpus().length
-      };
-
-      // Zipline stats
-      let zipStats;
-      try {
-        zipStats = await ziplineGetStats();
-      } catch (err) {
-        zipStats = { error: 'Unavailable' };
+      if (sub === 'logout') {
+        deleteUserToken(userId);
+        await interaction.reply({ content: '🚪 You have been logged out.', flags: MessageFlags.Ephemeral });
+        return;
       }
 
-      // User stats
-      let userMe;
-      try {
-        userMe = await ziplineGetMe(token);
-      } catch (err) {
-        userMe = { username: 'Unknown', quota: { used: 0, max: 0 } };
+      if (sub === 'invite') {
+        const inviteLink = `https://discord.com/oauth2/authorize?client_id=${config.clientId} | https://mr.stuffmaker.net/get-zipline-bot `;
+        await interaction.reply({ content: `🤖 Use me using this link:\n${inviteLink}\n Use me as user authorised app for it to work`, //flags: MessageFlags.Ephemeral 
+          });
+        return;
       }
 
-      const content = [
-        `**Host System**`,
-        `• OS: ${hostStats.os}`,
-        `• Uptime: ${(hostStats.uptime / 3600).toFixed(2)} hours`,
-        `• CPUs: ${hostStats.cpuCount}`,
-        `• Load Avg (1m): ${hostStats.loadAvg[0].toFixed(2)}`,
-        `• RAM used: ${(hostStats.usedMem / (1024 ** 2)).toFixed(2)} MB`,
-        `• RAM free: ${(hostStats.freeMem / (1024 ** 2)).toFixed(2)} MB`,
-        ``,
-        `**Zipline Stats**`,
-        zipStats.error
-          ? `• Error: ${zipStats.error}`
-          : [
-            `• Users: ${zipStats.users ?? '?'}`,
-            `• Files: ${zipStats.files ?? '?'}`,
-            `• Total Size: ${zipStats.size ? (zipStats.size / (1024 ** 3)).toFixed(2) + " GB" : '?'}`,
-          ].join('\n'),
-        ``,
-        `**Your Storage**`,
-        `• Username: ${userMe.username ?? '?'}`,
-        `• Used: ${((userMe.quota?.used ?? 0) / (1024 ** 2)).toFixed(2)} MB`,
-        `• Max: ${userMe.quota?.max ? ((userMe.quota.max) / (1024 ** 2)).toFixed(2) + " MB" : '∞'}`
-      ].join('\n');
+      if (sub === 'about') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-      await interaction.editReply({ content });
+        const commandId = '1441450591409668117';
+
+        const subcommands = [
+          { key: 'settoken', label: 'settoken 🔐', desc: 'Set your Zipline API token' },
+          { key: 'logout', label: 'logout 🚪', desc: 'Delete token (logout)' },
+          { key: 'me', label: 'me 👤', desc: 'Show your account info' },
+          { key: 'list', label: 'list 📂', desc: 'List your uploads' },
+          { key: 'upload', label: 'upload 📤', desc: 'Upload a file' },
+          { key: 'settings', label: 'settings ⚙️', desc: 'Manage your default upload settings' },
+          { key: 'invite', label: 'invite 🤖', desc: 'Show bot invite link' },
+          { key: 'about', label: 'about ℹ️', desc: 'Info about the bot and its commands' },
+          { key: 'stats', label: 'stats 📊', desc: 'Show host/server resource usage, Zipline stats, and your storage usage' }
+        ];
+
+        const commandsLines = subcommands.map(sc => {
+          return `${sc.label} </zipline ${sc.key}:${commandId}> — ${sc.desc}`;
+        });
+
+        const commandsList = commandsLines.join('\n');
+
+        const row = new ActionRowBuilder()
+          .addComponents(
+            new ButtonBuilder()
+              .setLabel('Support')
+              .setStyle(ButtonStyle.Link)
+              .setURL('https://discord.fish/')
+              .setEmoji('🆘'),
+            new ButtonBuilder()
+              .setLabel('GitHub')
+              .setStyle(ButtonStyle.Link)
+              .setURL('https://github.com/')
+              .setEmoji('🐙'),
+               new ButtonBuilder()
+              .setLabel('Website')
+              .setStyle(ButtonStyle.Link)
+              .setURL('https://zipline-bot.pawpatrol.dev')
+              .setEmoji('🌐')
+          );
+
+        await interaction.editReply({ content: `💡 **About the Bot**\n\n${commandsList}`, components: [row] });
+        return;
+      }
+
+      if (sub === 'settings') {
+        const settings = getUserSettings(userId);
+
+        const embed = new EmbedBuilder()
+          .setTitle('⚙️ User Settings')
+          .setDescription('Manage your default upload settings')
+          .addFields(
+            { name: '📅 Expiry', value: settings.expiry ? `\`${settings.expiry}\`` : 'Not set', inline: true },
+            { name: '🗜️ Compression', value: settings.compression ? `\`${settings.compression}\`` : 'Not set', inline: true }
+          )
+          .setColor(0x00b0ff)
+          .setFooter({ text: 'Click a button below to edit settings' });
+
+        const row = new ActionRowBuilder()
+          .addComponents(
+            new ButtonBuilder()
+              .setCustomId('edit_expiry')
+              .setLabel('Edit Expiry')
+              .setEmoji('📅')
+              .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+              .setCustomId('edit_compression')
+              .setLabel('Edit Compression')
+              .setEmoji('🗜️')
+              .setStyle(ButtonStyle.Secondary)
+          );
+
+        await interaction.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      // From here, token is required
+      const token = getUserToken(userId);
+      if (!token) {
+        await interaction.reply({ content: '❗ Please set your token first using </zipline settoken:1441450591409668117>.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      if (sub === 'me') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const data = await ziplineGetMe(token);
+        const embed = new EmbedBuilder()
+          .setTitle('👤 Account Info')
+          .addFields(
+            { name: 'Username', value: data.username || 'Unknown', inline: true },
+            { name: 'Role', value: data.role || 'Unknown', inline: true },
+            { name: 'Storage', value: `${data.quota?.used || 0}/${data.quota?.max || '∞'}`, inline: false }
+          )
+          .setColor(0x00ff00);
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (sub === 'list') {
+        const uploads = await ziplineFetchAllUserUploads(token);
+        if (!uploads.length) {
+          await interaction.reply({ content: 'No uploads found.', flags: MessageFlags.Ephemeral });
+          return;
+        }
+        await paginateUploads(interaction, uploads);
+        return;
+      }
+
+      if (sub === 'upload') {
+        const attachment = interaction.options.getAttachment('file', true);
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const uploadResp = await ziplineUploadFromUrl(token, attachment.url, attachment.name, userId);
+        const urls = (uploadResp.files || []).map(f => f.url || `${ZIPLINE_BASE_URL}/u/${f.id}`).join('\n');
+        const embed = new EmbedBuilder()
+          .setTitle('✅ Upload Successful')
+          .setDescription(`**[Click links below]**\n\`\`\`\n${urls}\n\`\`\``)
+          .setColor(0x00ff00);
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (sub === 'stats') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const hostStats = {
+          os: getReadableOSName(),
+          uptime: os.uptime(),
+          loadAvg: os.loadavg(),
+          totalMem: os.totalmem(),
+          freeMem: os.freemem(),
+          usedMem: process.memoryUsage().rss,
+          cpuCount: os.cpus().length
+        };
+
+        let zipStats;
+        try {
+          zipStats = await ziplineGetStats();
+        } catch {
+          zipStats = { error: 'Unavailable' };
+        }
+
+        let userMe;
+        try {
+          userMe = await ziplineGetMe(token);
+        } catch {
+          userMe = { username: 'Unknown', quota: { used: 0, max: 0 } };
+        }
+
+        const embed = new EmbedBuilder()
+          .setTitle('📊 Server & Zipline Stats')
+          .addFields(
+            { name: '🖥️ Host System', value: `**OS:** ${hostStats.os}\n**Uptime:** ${(hostStats.uptime / 3600).toFixed(2)}h\n**CPUs:** ${hostStats.cpuCount}\n**RAM:** ${(hostStats.usedMem / (1024 ** 2)).toFixed(2)}MB / ${(hostStats.freeMem / (1024 ** 2)).toFixed(2)}MB`, inline: true },
+            { name: '📈 Zipline', value: zipStats.error ? `❌ ${zipStats.error}` : `**Users:** ${zipStats.users ?? '?'}\n**Files:** ${zipStats.files ?? '?'}\n**Size:** ${zipStats.size ? (zipStats.size / (1024 ** 3)).toFixed(2) + " GB" : '?'}`, inline: true },
+            { name: `👤 ${userMe.username ?? 'You'}`, value: `**Used:** ${((userMe.quota?.used ?? 0) / (1024 ** 2)).toFixed(2)} MB\n**Max:** ${userMe.quota?.max ? ((userMe.quota.max) / (1024 ** 2)).toFixed(2) + " MB" : '∞'}`, inline: false }
+          )
+          .setColor(0x5865f2);
+
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+    }
+
+    // Button Interactions for Settings
+    if (interaction.isButton() && (interaction.customId === 'edit_expiry' || interaction.customId === 'edit_compression')) {
+      const modal = new ModalBuilder()
+        .setCustomId(interaction.customId)
+        .setTitle(interaction.customId === 'edit_expiry' ? 'Expiry (days/date)' : 'Compression level');
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('value_input')
+            .setLabel(interaction.customId === 'edit_expiry' ? 'Enter expiry (e.g. 7d or 2025-01-01)' : 'Enter compression (e.g. low, medium)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+            .setMaxLength(45)
+        )
+      );
+
+      await interaction.showModal(modal);
+      return;
+    }
+
+    // Modal Submit for Settings
+    if (interaction.type === InteractionType.ModalSubmit && (interaction.customId === 'edit_expiry' || interaction.customId === 'edit_compression')) {
+      const value = interaction.fields.getTextInputValue('value_input');
+      if (interaction.customId === 'edit_expiry') {
+        setUserSettings(userId, { ...getUserSettings(userId), expiry: value });
+      } else {
+        setUserSettings(userId, { ...getUserSettings(userId), compression: value });
+      }
+
+      const updatedSettings = getUserSettings(userId);
+      const embed = new EmbedBuilder()
+        .setTitle('✅ Settings Updated!')
+        .setDescription('Your new default upload settings:')
+        .addFields(
+          { name: '📅 Expiry', value: updatedSettings.expiry ? `\`${updatedSettings.expiry}\`` : 'Not set', inline: true },
+          { name: '🗜️ Compression', value: updatedSettings.compression ? `\`${updatedSettings.compression}\`` : 'Not set', inline: true }
+        )
+        .setColor(0x00ff88)
+        .setFooter({ text: 'These settings apply to all future uploads.' });
+
+      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
       return;
     }
   } catch (error) {
     logError(error, 'InteractionHandler');
-    if (interaction.deferred || interaction.replied) {
-      await interaction.editReply('❌ An error occurred.');
-    } else {
-      await interaction.reply({ content: '❌ An error occurred.', ephemeral: true });
-    }
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply('❌ An error occurred.');
+      } else {
+        await interaction.reply({ content: '❌ An error occurred.', flags: MessageFlags.Ephemeral });
+      }
+    } catch { }
   }
 });
 
+// Start bot and deploy commands
 deployCommands().then(() => client.login(config.discordToken));
