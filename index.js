@@ -392,12 +392,12 @@ client.on(Events.InteractionCreate, async interaction => {
             new ButtonBuilder()
               .setLabel('Support')
               .setStyle(ButtonStyle.Link)
-              .setURL('https://discord.fish/')
+              .setURL('https://discord.fish/stuffmaker')
               .setEmoji('🆘'),
             new ButtonBuilder()
               .setLabel('GitHub')
               .setStyle(ButtonStyle.Link)
-              .setURL('https://github.com/')
+              .setURL('https://github.com/MrStuffmaker/zipline-discord-integration')
               .setEmoji('🐙'),
                new ButtonBuilder()
               .setLabel('Website')
