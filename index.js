@@ -539,7 +539,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const urls = (uploadResp.files || []).map(f => f.url || `${ZIPLINE_BASE_URL}/u/${f.id}`).join('\n');
         const embed = new EmbedBuilder()
           .setTitle('✅ Upload Successful')
-          .setDescription(`**[Click links below]**\n\`\`\`\n${urls}\n\`\`\``)
+          .setDescription(`**[Click the link to view your upload](${urls})**`)
           .setColor(0x00ff00);
         await interaction.editReply({ embeds: [embed] });
         return;
