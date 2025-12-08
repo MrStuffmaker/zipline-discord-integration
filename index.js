@@ -25,7 +25,14 @@ import os from 'os';
 
 // Config and constants
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
+
+// Haupt-Zipline (für eingeloggte User)
 const ZIPLINE_BASE_URL = config.ziplineBaseUrl;
+
+// Anonyme Zipline-Instanz (für User ohne Login)
+const ANON_ZIPLINE_BASE_URL = config.anonymousZiplineBaseUrl;
+const ANON_ZIPLINE_TOKEN = config.anonymousZiplineToken;
+const ANON_UPLOAD_EXPIRY = config.anonymousUploadExpiry || null;
 
 const DATA_DIR = './data';
 const TOKENS_FILE = path.join(DATA_DIR, 'userTokens.json');
@@ -69,13 +76,13 @@ function getUserSettings(userId) {
 
 function setUserSettings(userId, settings) {
   userSettings[userId] = {
-    expiry: settings.expiry?.trim() || null,
-    compression: settings.compression?.trim() || null
+    expiry: settings.expiry ? settings.expiry.trim() : null,
+    compression: settings.compression ? settings.compression.trim() : null
   };
   saveSettings();
 }
 
-// Token validation function
+// Token validation function (Haupt-Instanz)
 async function validateZiplineToken(token) {
   try {
     const res = await fetch(`${ZIPLINE_BASE_URL}/api/user`, {
@@ -132,7 +139,7 @@ async function ziplineFetchAllUserUploads(token) {
   return allUploads;
 }
 
-// Upload file (with user settings)
+// Upload file (für eingeloggte User, mit userSettings)
 async function ziplineUploadFromUrl(token, fileUrl, filename, userId) {
   const settings = getUserSettings(userId);
 
@@ -155,10 +162,10 @@ async function ziplineUploadFromUrl(token, fileUrl, filename, userId) {
     ...form.getHeaders()
   };
 
+  // User-spezifische Einstellungen auf Haupt-Instanz
   if (settings.expiry && settings.expiry !== '') {
     headers['x-zipline-deletes-at'] = settings.expiry;
   }
-
   if (settings.compression && settings.compression !== '') {
     headers['x-zipline-compression'] = settings.compression;
   }
@@ -171,6 +178,48 @@ async function ziplineUploadFromUrl(token, fileUrl, filename, userId) {
 
   fs.unlinkSync(tmpPath);
   if (!resUpload.ok) throw new Error(`Zipline upload error ${resUpload.status}`);
+
+  return resUpload.json();
+}
+
+// Upload file (anonyme Instanz, ohne User-Login)
+async function ziplineAnonUploadFromUrl(fileUrl, filename) {
+  if (!ANON_ZIPLINE_BASE_URL || !ANON_ZIPLINE_TOKEN) {
+    throw new Error('Anonymous Zipline instance or token not configured in config.json');
+  }
+
+  const tmpPath = path.join('./', `tmp_anon_${Date.now()}_${filename}`);
+  const dlRes = await fetch(fileUrl);
+  if (!dlRes.ok) throw new Error('Failed to download attachment');
+
+  const fileStream = fs.createWriteStream(tmpPath);
+  await new Promise((res, rej) => {
+    dlRes.body.pipe(fileStream);
+    dlRes.body.on('error', rej);
+    fileStream.on('finish', res);
+  });
+
+  const form = new FormData();
+  form.append('file', fs.createReadStream(tmpPath));
+
+  const headers = {
+    Authorization: ANON_ZIPLINE_TOKEN,
+    ...form.getHeaders()
+  };
+
+  // Standard-Ablaufzeit aus config.json für anonyme Uploads
+  if (ANON_UPLOAD_EXPIRY && ANON_UPLOAD_EXPIRY !== '') {
+    headers['x-zipline-deletes-at'] = ANON_UPLOAD_EXPIRY; // z.B. "7d" oder "date=2025-01-01T00:00:00Z"[web:6]
+  }
+
+  const resUpload = await fetch(`${ANON_ZIPLINE_BASE_URL}/api/upload`, {
+    method: 'POST',
+    headers,
+    body: form
+  });
+
+  fs.unlinkSync(tmpPath);
+  if (!resUpload.ok) throw new Error(`Anonymous Zipline upload error ${resUpload.status}`);
 
   return resUpload.json();
 }
@@ -371,7 +420,6 @@ client.on(Events.InteractionCreate, async interaction => {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         const token = interaction.options.getString('token', true);
-
         const validation = await validateZiplineToken(token);
 
         if (validation.valid) {
@@ -497,17 +545,18 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      // From here, token is needed
+      // Ab hier werden nur Befehle behandelt, die ein Token auf der Hauptinstanz brauchen
       const token = getUserToken(userId);
-      if (!token) {
-        await interaction.reply({
-          content: `❗ Please set your token first using </zipline settoken:1441450591409668117>.\n🔗 Zipline URL: ${ZIPLINE_BASE_URL}`,
-          flags: MessageFlags.Ephemeral
-        });
-        return;
-      }
 
       if (sub === 'me') {
+        if (!token) {
+          await interaction.reply({
+            content: `❗ Please set your token first using </zipline settoken:1441450591409668117>.\n🔗 Zipline URL: ${ZIPLINE_BASE_URL}`,
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const data = await ziplineGetMe(token);
         const embed = new EmbedBuilder()
@@ -523,6 +572,14 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       if (sub === 'list') {
+        if (!token) {
+          await interaction.reply({
+            content: `❗ Please set your token first using </zipline settoken:1441450591409668117>.\n🔗 Zipline URL: ${ZIPLINE_BASE_URL}`,
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+
         const uploads = await ziplineFetchAllUserUploads(token);
         if (!uploads.length) {
           await interaction.reply({ content: 'No uploads found.', flags: MessageFlags.Ephemeral });
@@ -535,17 +592,53 @@ client.on(Events.InteractionCreate, async interaction => {
       if (sub === 'upload') {
         const attachment = interaction.options.getAttachment('file', true);
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const uploadResp = await ziplineUploadFromUrl(token, attachment.url, attachment.name, userId);
-        const urls = (uploadResp.files || []).map(f => f.url || `${ZIPLINE_BASE_URL}/u/${f.id}`).join('\n');
-        const embed = new EmbedBuilder()
-          .setTitle('✅ Upload Successful')
-          .setDescription(`**[Click the link to view your upload](${urls})**`)
-          .setColor(0x00ff00);
-        await interaction.editReply({ embeds: [embed] });
+
+        const userToken = getUserToken(userId);
+
+        // Wenn der User eingeloggt ist -> Hauptinstanz + User-Settings
+        if (userToken) {
+          const uploadResp = await ziplineUploadFromUrl(userToken, attachment.url, attachment.name, userId);
+          const urls = (uploadResp.files || []).map(f =>
+            f.url || `${ZIPLINE_BASE_URL}/u/${f.id}`
+          ).join('\n');
+
+          const embed = new EmbedBuilder()
+            .setTitle('✅ Upload Successful')
+            .setDescription(`**[Click the link to view your upload](${urls})**`)
+            .setColor(0x00ff00);
+
+          await interaction.editReply({ embeds: [embed] });
+        } else {
+          // Kein Login -> anonyme Instanz mit Daten aus config.json
+          const uploadResp = await ziplineAnonUploadFromUrl(attachment.url, attachment.name);
+          const urls = (uploadResp.files || []).map(f =>
+            f.url || `${ANON_ZIPLINE_BASE_URL}/u/${f.id}`
+          ).join('\n');
+
+          const embed = new EmbedBuilder()
+            .setTitle('✅ Anonymous Upload Successful')
+            .setDescription(`**[Click the link to view your upload](${urls})**`)
+            .addFields(
+              ANON_UPLOAD_EXPIRY
+                ? { name: '⏱ Expiry', value: `This file is set to expire after: \`${ANON_UPLOAD_EXPIRY}\``, inline: false }
+                : { name: '⏱ Expiry', value: 'No default expiry configured.', inline: false }
+            )
+            .setColor(0x00ff00);
+
+          await interaction.editReply({ embeds: [embed] });
+        }
         return;
       }
 
       if (sub === 'stats') {
+        if (!token) {
+          await interaction.reply({
+            content: `❗ Please set your token first using </zipline settoken:1441450591409668117>.\n🔗 Zipline URL: ${ZIPLINE_BASE_URL}`,
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         const hostStats = {
@@ -575,9 +668,31 @@ client.on(Events.InteractionCreate, async interaction => {
         const embed = new EmbedBuilder()
           .setTitle('📊 Server & Zipline Stats')
           .addFields(
-            { name: '🖥️ Host System', value: `**OS:** ${hostStats.os}\n**Uptime:** ${(hostStats.uptime / 3600).toFixed(2)}h\n**CPUs:** ${hostStats.cpuCount}\n**RAM:** ${(hostStats.usedMem / (1024 ** 2)).toFixed(2)}MB / ${(hostStats.freeMem / (1024 ** 2)).toFixed(2)}MB`, inline: true },
-            { name: '📈 Zipline', value: zipStats.error ? `❌ ${zipStats.error}` : `**Users:** ${zipStats.users ?? '?'}\n**Files:** ${zipStats.files ?? '?'}\n**Size:** ${zipStats.size ? (zipStats.size / (1024 ** 3)).toFixed(2) + " GB" : '?'}`, inline: true },
-            { name: `👤 ${userMe.username ?? 'You'}`, value: `**Used:** ${((userMe.quota?.used ?? 0) / (1024 ** 2)).toFixed(2)} MB\n**Max:** ${userMe.quota?.max ? ((userMe.quota.max) / (1024 ** 2)).toFixed(2) + " MB" : '∞'}`, inline: false }
+            {
+              name: '🖥️ Host System',
+              value:
+                `**OS:** ${hostStats.os}\n` +
+                `**Uptime:** ${(hostStats.uptime / 3600).toFixed(2)}h\n` +
+                `**CPUs:** ${hostStats.cpuCount}\n` +
+                `**RAM:** ${(hostStats.usedMem / (1024 * 1024)).toFixed(2)}MB / ${(hostStats.freeMem / (1024 * 1024)).toFixed(2)}MB`,
+              inline: true
+            },
+            {
+              name: '📈 Zipline',
+              value: zipStats.error
+                ? `❌ ${zipStats.error}`
+                : `**Users:** ${zipStats.users ?? '?'}\n` +
+                  `**Files:** ${zipStats.files ?? '?'}\n` +
+                  `**Size:** ${zipStats.size ? (zipStats.size / (1024 * 1024 * 1024)).toFixed(2) + ' GB' : '?'}`,
+              inline: true
+            },
+            {
+              name: `👤 ${userMe.username ?? 'You'}`,
+              value:
+                `**Used:** ${((userMe.quota && userMe.quota.used ? userMe.quota.used : 0) / (1024 * 1024)).toFixed(2)} MB\n` +
+                `**Max:** ${userMe.quota && userMe.quota.max ? (userMe.quota.max / (1024 * 1024)).toFixed(2) + ' MB' : '∞'}`,
+              inline: false
+            }
           )
           .setColor(0x5865f2);
 
