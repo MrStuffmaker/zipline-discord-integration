@@ -185,7 +185,7 @@ async function ziplineUploadFromUrl(token, fileUrl, filename, userId) {
 // Upload file (anonyme Instanz, ohne User-Login)
 async function ziplineAnonUploadFromUrl(fileUrl, filename) {
   if (!ANON_ZIPLINE_BASE_URL || !ANON_ZIPLINE_TOKEN) {
-    throw new Error('Anonymous Zipline instance or token not configured in config.json');
+    throw new Error('Guest Zipline instance or token not configured in config.json');
   }
 
   const tmpPath = path.join('./', `tmp_anon_${Date.now()}_${filename}`);
@@ -219,7 +219,7 @@ async function ziplineAnonUploadFromUrl(fileUrl, filename) {
   });
 
   fs.unlinkSync(tmpPath);
-  if (!resUpload.ok) throw new Error(`Anonymous Zipline upload error ${resUpload.status}`);
+  if (!resUpload.ok) throw new Error(`Guest Zipline upload error ${resUpload.status}`);
 
   return resUpload.json();
 }
@@ -616,7 +616,7 @@ client.on(Events.InteractionCreate, async interaction => {
           ).join('\n');
 
           const embed = new EmbedBuilder()
-            .setTitle('✅ Anonymous Upload Successful')
+            .setTitle('✅ Guest Upload Successful')
             .setDescription(`**[Click the link to view your upload](${urls})**`)
             .addFields(
               ANON_UPLOAD_EXPIRY
